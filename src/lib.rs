@@ -10,6 +10,7 @@ use std::{
 };
 use ssri::Integrity;
 use miette::{IntoDiagnostic};
+use sanitize_filename::sanitize;
 
 const STORE_DIR: &str = "pnpm-store";
 
@@ -17,11 +18,12 @@ const STORE_DIR: &str = "pnpm-store";
 extern crate napi_derive;
 
 #[napi]
-pub async fn fetch_tarball(url: String) -> String {
+pub async fn fetch_tarball(url: String) -> HashMap<String, String> {
     let response = _fetch_tarball(&url).await.unwrap();
     let decompressed_response = decompress_gzip(&response).unwrap();
-    let cas_file_map = extract_tarball(decompressed_response).unwrap();
-    serde_json::to_string(&cas_file_map).unwrap()
+    let target_dir = sanitize(&url);
+    let cas_file_map = extract_tarball(&target_dir, decompressed_response).unwrap();
+    cas_file_map
 }
 
 async fn _fetch_tarball(url: &str) -> Result<bytes::Bytes, Box<dyn std::error::Error>> {
@@ -54,13 +56,14 @@ pub fn decompress_gzip(gz_data: &[u8]) -> Result<Vec<u8>, Box<dyn Error>> {
 }
 
 pub fn extract_tarball(
+    target_dir: &str,
     data: Vec<u8>
-) -> Result<HashMap<String, Integrity>, Box<dyn Error>> {
+) -> Result<HashMap<String, String>, Box<dyn Error>> {
     // Generate the tarball archive given the decompressed bytes
     let mut node_archive = Archive::new(Cursor::new(data));
 
     // extract to both the global store + node_modules (in the case of them using the pnpm linking algorithm)
-    let mut cas_file_map: HashMap<String, Integrity> = HashMap::new();
+    let mut cas_file_map: HashMap<String, String> = HashMap::new();
 
     for entry in node_archive.entries().into_diagnostic()? {
         let mut entry = entry.into_diagnostic()?;
@@ -74,12 +77,22 @@ pub fn extract_tarball(
         // Remove `package/` from `package/lib/index.js`
         let cleaned_entry_path_string = entry_path.strip_prefix("package/").unwrap();
 
-        // Write the contents of the entry into the content-addressable store located at `app.volt_dir`
-        // We get a hash of the file
-        let sri = cacache::write_hash_sync(STORE_DIR, &buffer).into_diagnostic()?;
+        let dir = PathBuf::from(STORE_DIR).join(target_dir);
+        std::fs::create_dir_all(&dir).into_diagnostic()?;
+        let file_path = PathBuf::from(STORE_DIR)
+            .join(target_dir)
+            .join(sanitize(cleaned_entry_path_string.to_string_lossy().as_ref()));
+        let mut file = std::fs::File::create(&file_path).unwrap();
+
+        file.write_all(&buffer).into_diagnostic()?;
+
+        // // Write the contents of the entry into the content-addressable store located at `app.volt_dir`
+        // // We get a hash of the file
+        // let sri = cacache::write_hash_sync(STORE_DIR, &buffer).into_diagnostic()?;
+        // cacache::get_sync(STORE_DIR, &sri).into_diagnostic()?;
 
         // Insert the name of the file and map it to the hash of the file
-        cas_file_map.insert(cleaned_entry_path_string.to_str().unwrap().to_string(), sri);
+        cas_file_map.insert(cleaned_entry_path_string.to_str().unwrap().to_string(), file_path.to_string_lossy().into_owned());
     }
 
     Ok(cas_file_map)

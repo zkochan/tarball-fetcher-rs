@@ -11,6 +11,7 @@ use std::{
 use ssri::Integrity;
 use miette::{IntoDiagnostic};
 use sanitize_filename::sanitize;
+use tokio::task;
 
 const STORE_DIR: &str = "pnpm-store";
 
@@ -20,10 +21,14 @@ extern crate napi_derive;
 #[napi]
 pub async fn fetch_tarball(url: String) -> HashMap<String, String> {
     let response = _fetch_tarball(&url).await.unwrap();
-    let decompressed_response = decompress_gzip(&response).unwrap();
-    let target_dir = sanitize(&url);
-    let cas_file_map = extract_tarball(&target_dir, decompressed_response).unwrap();
-    cas_file_map
+    task::spawn_blocking(move || {
+        let decompressed_response = decompress_gzip(&response).unwrap();
+        let target_dir = sanitize(&url);
+        let cas_file_map = extract_tarball(&target_dir, decompressed_response).unwrap();
+        cas_file_map
+    })
+    .await
+    .unwrap()
 }
 
 async fn _fetch_tarball(url: &str) -> Result<bytes::Bytes, Box<dyn std::error::Error>> {

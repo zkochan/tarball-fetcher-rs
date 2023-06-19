@@ -35,7 +35,7 @@ pub async fn fetch_tarball(url: String) -> HashMap<String, String> {
 }
 
 async fn _fetch_tarball(url: &str) -> Result<bytes::Bytes, Box<dyn std::error::Error>> {
-    let client = CLIENT.get_or_init(Client::new);
+    let client = CLIENT.get_or_init(|| Client::builder().use_rustls_tls().build().unwrap());
     let res = client.get(url)
         .send()
         .await?;

@@ -7,12 +7,15 @@ use std::{
     collections::HashMap,
     io::{Cursor, Read, Write},
     path::PathBuf,
+    sync::OnceLock,
 };
 use ssri::Integrity;
 use miette::{IntoDiagnostic};
 use sanitize_filename::sanitize;
 
 const STORE_DIR: &str = "pnpm-store";
+
+static CLIENT: OnceLock<Client> = OnceLock::new();
 
 #[macro_use]
 extern crate napi_derive;
@@ -27,7 +30,7 @@ pub async fn fetch_tarball(url: String) -> HashMap<String, String> {
 }
 
 async fn _fetch_tarball(url: &str) -> Result<bytes::Bytes, Box<dyn std::error::Error>> {
-    let client = Client::new();
+    let client = CLIENT.get_or_init(Client::new);
     let res = client.get(url)
         .send()
         .await?;

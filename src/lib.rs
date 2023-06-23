@@ -14,7 +14,7 @@ use miette::{IntoDiagnostic};
 use sanitize_filename::sanitize;
 use tokio::task;
 
-const STORE_DIR: &str = "pnpm-store";
+const STORE_DIR: &str = "/Users/zoltan/src/pnpm/test-rs-fetcher/pnpm-store";
 
 static CLIENT: OnceLock<Client> = OnceLock::new();
 
@@ -90,9 +90,11 @@ pub fn extract_tarball(
         let file_path = PathBuf::from(STORE_DIR)
             .join(target_dir)
             .join(sanitize(cleaned_entry_path_string.to_string_lossy().as_ref()));
-        let mut file = std::fs::File::create(&file_path).unwrap();
+        if !std::path::Path::exists(&file_path) {
+            let mut file = std::fs::File::create(&file_path).unwrap();
 
-        file.write_all(&buffer).into_diagnostic()?;
+            file.write_all(&buffer).into_diagnostic()?;
+        }
 
         // // Write the contents of the entry into the content-addressable store located at `app.volt_dir`
         // // We get a hash of the file

@@ -83,7 +83,11 @@ pub fn extract_tarball(
         let entry_path = entry.path().unwrap();
 
         // Remove `package/` from `package/lib/index.js`
-        let cleaned_entry_path_string = entry_path.strip_prefix("package/").unwrap();
+        let cleaned_entry_path_string = if let Ok(stripped) = entry_path.strip_prefix("package/") {
+            stripped
+        } else {
+            &entry_path // If strip_prefix fails, use the original string
+        };
 
         let dir = PathBuf::from(STORE_DIR).join(target_dir);
         std::fs::create_dir_all(&dir).into_diagnostic()?;

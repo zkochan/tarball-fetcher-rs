@@ -81,9 +81,10 @@ pub fn extract_tarball(
         entry.read_to_end(&mut buffer).into_diagnostic()?;
 
         let entry_path = entry.path().unwrap();
+        let parent_path = entry_path.parent().unwrap();
 
         // Remove `package/` from `package/lib/index.js`
-        let cleaned_entry_path_string = if let Ok(stripped) = entry_path.strip_prefix("package/") {
+        let cleaned_entry_path_string = if let Ok(stripped) = entry_path.strip_prefix(parent_path) {
             stripped
         } else {
             &entry_path // If strip_prefix fails, use the original string

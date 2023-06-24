@@ -81,18 +81,18 @@ pub fn extract_tarball(
         entry.read_to_end(&mut buffer).into_diagnostic()?;
 
         let entry_path = entry.path().unwrap();
-
-        // Remove `package/` from `package/lib/index.js`
-        let cleaned_entry_path_string = entry_path.strip_prefix("package/").unwrap();
+        let components = entry_path.components();
+        let cleaned_entry_path: std::path::PathBuf = components.skip(1).collect();
 
         let dir = PathBuf::from(STORE_DIR).join(target_dir);
         std::fs::create_dir_all(&dir).into_diagnostic()?;
         let file_path = PathBuf::from(STORE_DIR)
             .join(target_dir)
-            .join(sanitize(cleaned_entry_path_string.to_string_lossy().as_ref()));
-        let mut file = std::fs::File::create(&file_path).unwrap();
-
-        file.write_all(&buffer).into_diagnostic()?;
+            .join(sanitize(cleaned_entry_path.to_string_lossy().as_ref()));
+        if !std::path::Path::exists(&file_path) {
+            let mut file = std::fs::File::create(&file_path).unwrap();
+            file.write_all(&buffer).into_diagnostic()?;
+        }
 
         // // Write the contents of the entry into the content-addressable store located at `app.volt_dir`
         // // We get a hash of the file
@@ -100,7 +100,7 @@ pub fn extract_tarball(
         // cacache::get_sync(STORE_DIR, &sri).into_diagnostic()?;
 
         // Insert the name of the file and map it to the hash of the file
-        cas_file_map.insert(cleaned_entry_path_string.to_str().unwrap().to_string(), file_path.to_string_lossy().into_owned());
+        cas_file_map.insert(cleaned_entry_path.to_str().unwrap().to_string(), file_path.to_string_lossy().into_owned());
     }
 
     Ok(cas_file_map)

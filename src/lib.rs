@@ -9,7 +9,7 @@ use std::{
     path::PathBuf,
     sync::OnceLock,
 };
-use ssri::Integrity;
+use ssri::{Integrity, Algorithm, IntegrityOpts};
 use miette::{IntoDiagnostic};
 use sanitize_filename::sanitize;
 use tokio::task;
@@ -86,10 +86,16 @@ pub fn extract_tarball(
 
         let dir = PathBuf::from(STORE_DIR).join(target_dir);
         std::fs::create_dir_all(&dir).into_diagnostic()?;
+        let (_, hex_integrity) = IntegrityOpts::new()
+            .algorithm(Algorithm::Sha256)
+            .chain(&buffer)
+            .result()
+            .to_hex();
         let file_path = PathBuf::from(STORE_DIR)
-            .join(target_dir)
-            .join(sanitize(cleaned_entry_path.to_string_lossy().as_ref()));
+            .join(content_path_from_hex(FileType::NonExec, &hex_integrity));
         if !std::path::Path::exists(&file_path) {
+            let parent_dir = file_path.parent().unwrap();
+            std::fs::create_dir_all(parent_dir).unwrap();
             let mut file = std::fs::File::create(&file_path).unwrap();
             file.write_all(&buffer).into_diagnostic()?;
         }

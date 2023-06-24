@@ -14,7 +14,7 @@ use miette::{IntoDiagnostic};
 use sanitize_filename::sanitize;
 use tokio::task;
 
-const STORE_DIR: &str = "/Users/zoltan/src/pnpm/test-rs-fetcher/pnpm-store";
+const STORE_DIR: &str = "pnpm-store";
 
 static CLIENT: OnceLock<Client> = OnceLock::new();
 
@@ -91,7 +91,6 @@ pub fn extract_tarball(
             .join(sanitize(cleaned_entry_path.to_string_lossy().as_ref()));
         if !std::path::Path::exists(&file_path) {
             let mut file = std::fs::File::create(&file_path).unwrap();
-
             file.write_all(&buffer).into_diagnostic()?;
         }
 

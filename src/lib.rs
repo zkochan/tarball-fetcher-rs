@@ -2,6 +2,7 @@
 
 use reqwest::Client;
 use tar::Archive;
+use std::path::Path;
 use std::{
     error::Error,
     collections::HashMap,
@@ -11,7 +12,6 @@ use std::{
 };
 use ssri::{Integrity, Algorithm, IntegrityOpts};
 use miette::{IntoDiagnostic};
-use sanitize_filename::sanitize;
 use tokio::task;
 
 const STORE_DIR: &str = "pnpm-store";
@@ -30,8 +30,9 @@ pub async fn fetch_tarball(url: String, integrity: String) -> Result<HashMap<Str
     }
     task::spawn_blocking(move || {
         let decompressed_response = decompress_gzip(&response).unwrap();
-        let target_dir = sanitize(&url);
-        let cas_file_map = extract_tarball(&target_dir, decompressed_response).unwrap();
+        let parsed: Integrity = integrity.parse().unwrap();
+        let index_location_pb = content_path_from_hex(FileType::Index, parsed.to_hex().1.as_str());
+        let cas_file_map = extract_tarball(index_location_pb.as_path(), decompressed_response).unwrap();
         Ok(cas_file_map)
     })
     .await
@@ -109,7 +110,7 @@ pub fn decompress_gzip(gz_data: &[u8]) -> Result<Vec<u8>, Box<dyn Error>> {
 }
 
 pub fn extract_tarball(
-    target_dir: &str,
+    index_location: &Path,
     data: Vec<u8>
 ) -> Result<HashMap<String, String>, Box<dyn Error>> {
     // Generate the tarball archive given the decompressed bytes
@@ -151,8 +152,9 @@ pub fn extract_tarball(
         // Insert the name of the file and map it to the hash of the file
         cas_file_map.insert(cleaned_entry_path.to_str().unwrap().to_string(), file_path.to_string_lossy().into_owned());
     }
-    let mut dir = PathBuf::from(STORE_DIR).join(target_dir);
-    dir.set_extension("json");
+    let dir = PathBuf::from(STORE_DIR).join(index_location);
+    let parent_dir = dir.parent().unwrap();
+    std::fs::create_dir_all(parent_dir).unwrap();
     std::fs::write(dir, serde_json::to_string(&cas_file_map)?)?;
 
     Ok(cas_file_map)

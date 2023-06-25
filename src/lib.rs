@@ -84,10 +84,8 @@ pub fn extract_tarball(
         let components = entry_path.components();
         let cleaned_entry_path: std::path::PathBuf = components.skip(1).collect();
 
-        let dir = PathBuf::from(STORE_DIR).join(target_dir);
-        std::fs::create_dir_all(&dir).into_diagnostic()?;
         let (_, hex_integrity) = IntegrityOpts::new()
-            .algorithm(Algorithm::Sha256)
+            .algorithm(Algorithm::Sha512)
             .chain(&buffer)
             .result()
             .to_hex();
@@ -108,6 +106,9 @@ pub fn extract_tarball(
         // Insert the name of the file and map it to the hash of the file
         cas_file_map.insert(cleaned_entry_path.to_str().unwrap().to_string(), file_path.to_string_lossy().into_owned());
     }
+    let mut dir = PathBuf::from(STORE_DIR).join(target_dir);
+    dir.set_extension("json");
+    std::fs::write(dir, serde_json::to_string(&cas_file_map)?)?;
 
     Ok(cas_file_map)
 }

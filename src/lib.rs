@@ -22,16 +22,61 @@ static CLIENT: OnceLock<Client> = OnceLock::new();
 extern crate napi_derive;
 
 #[napi]
-pub async fn fetch_tarball(url: String) -> HashMap<String, String> {
+pub async fn fetch_tarball(url: String, integrity: String) -> Result<HashMap<String, String>, napi::Error> {
     let response = _fetch_tarball(&url).await.unwrap();
+    let (verified, _checksum) = verify_checksum(&response, &integrity).unwrap();
+    if !verified {
+        return Err(napi::Error::new(napi::Status::GenericFailure, "Tarball verification failed"));
+    }
     task::spawn_blocking(move || {
         let decompressed_response = decompress_gzip(&response).unwrap();
         let target_dir = sanitize(&url);
         let cas_file_map = extract_tarball(&target_dir, decompressed_response).unwrap();
-        cas_file_map
+        Ok(cas_file_map)
     })
     .await
     .unwrap()
+}
+
+pub fn verify_checksum(
+    response: &bytes::Bytes,
+    expeced_checksum: &str,
+) -> Result<(bool, Option<String>), Box<dyn std::error::Error>> {
+    // begin
+    // there are only 2 supported algorithms
+    // sha1 and sha512
+    // so we can be sure that if it doesn't start with sha1, it's going to have to be sha512
+
+    let algorithm = if expeced_checksum.starts_with("sha1") {
+        Algorithm::Sha1
+    } else {
+        Algorithm::Sha512
+    };
+
+    let calculated_checksum = calc_hash(response, algorithm)?;
+
+    if calculated_checksum == expeced_checksum {
+        Ok((true, None))
+    } else {
+        Ok((false, Some(calculated_checksum)))
+    }
+}
+
+fn calc_hash(data: &bytes::Bytes, algorithm: Algorithm) -> Result<String, Box<dyn std::error::Error>> {
+    let integrity = if algorithm == Algorithm::Sha1 {
+        let hash = ssri::IntegrityOpts::new()
+            .algorithm(Algorithm::Sha1)
+            .chain(&data)
+            .result();
+        format!("sha1-{}", hash.to_hex().1)
+    } else {
+        ssri::IntegrityOpts::new()
+            .algorithm(Algorithm::Sha512)
+            .chain(&data)
+            .result()
+            .to_string()
+    };
+    Ok(integrity)
 }
 
 async fn _fetch_tarball(url: &str) -> Result<bytes::Bytes, Box<dyn std::error::Error>> {

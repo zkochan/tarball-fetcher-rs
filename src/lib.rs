@@ -2,6 +2,7 @@
 
 use reqwest::Client;
 use tar::Archive;
+use std::path::Path;
 use std::{
     error::Error,
     collections::HashMap,
@@ -9,9 +10,8 @@ use std::{
     path::PathBuf,
     sync::OnceLock,
 };
-use ssri::Integrity;
+use ssri::{Integrity, Algorithm, IntegrityOpts};
 use miette::{IntoDiagnostic};
-use sanitize_filename::sanitize;
 use tokio::task;
 
 const STORE_DIR: &str = "pnpm-store";
@@ -22,16 +22,62 @@ static CLIENT: OnceLock<Client> = OnceLock::new();
 extern crate napi_derive;
 
 #[napi]
-pub async fn fetch_tarball(url: String) -> HashMap<String, String> {
+pub async fn fetch_tarball(url: String, integrity: String) -> Result<HashMap<String, String>, napi::Error> {
     let response = _fetch_tarball(&url).await.unwrap();
+    let (verified, _checksum) = verify_checksum(&response, &integrity).unwrap();
+    if !verified {
+        return Err(napi::Error::new(napi::Status::GenericFailure, "Tarball verification failed"));
+    }
     task::spawn_blocking(move || {
         let decompressed_response = decompress_gzip(&response).unwrap();
-        let target_dir = sanitize(&url);
-        let cas_file_map = extract_tarball(&target_dir, decompressed_response).unwrap();
-        cas_file_map
+        let parsed: Integrity = integrity.parse().unwrap();
+        let index_location_pb = content_path_from_hex(FileType::Index, parsed.to_hex().1.as_str());
+        let cas_file_map = extract_tarball(index_location_pb.as_path(), decompressed_response).unwrap();
+        Ok(cas_file_map)
     })
     .await
     .unwrap()
+}
+
+pub fn verify_checksum(
+    response: &bytes::Bytes,
+    expeced_checksum: &str,
+) -> Result<(bool, Option<String>), Box<dyn std::error::Error>> {
+    // begin
+    // there are only 2 supported algorithms
+    // sha1 and sha512
+    // so we can be sure that if it doesn't start with sha1, it's going to have to be sha512
+
+    let algorithm = if expeced_checksum.starts_with("sha1") {
+        Algorithm::Sha1
+    } else {
+        Algorithm::Sha512
+    };
+
+    let calculated_checksum = calc_hash(response, algorithm)?;
+
+    if calculated_checksum == expeced_checksum {
+        Ok((true, None))
+    } else {
+        Ok((false, Some(calculated_checksum)))
+    }
+}
+
+fn calc_hash(data: &bytes::Bytes, algorithm: Algorithm) -> Result<String, Box<dyn std::error::Error>> {
+    let integrity = if algorithm == Algorithm::Sha1 {
+        let hash = ssri::IntegrityOpts::new()
+            .algorithm(Algorithm::Sha1)
+            .chain(&data)
+            .result();
+        format!("sha1-{}", hash.to_hex().1)
+    } else {
+        ssri::IntegrityOpts::new()
+            .algorithm(Algorithm::Sha512)
+            .chain(&data)
+            .result()
+            .to_string()
+    };
+    Ok(integrity)
 }
 
 async fn _fetch_tarball(url: &str) -> Result<bytes::Bytes, Box<dyn std::error::Error>> {
@@ -64,7 +110,7 @@ pub fn decompress_gzip(gz_data: &[u8]) -> Result<Vec<u8>, Box<dyn Error>> {
 }
 
 pub fn extract_tarball(
-    target_dir: &str,
+    index_location: &Path,
     data: Vec<u8>
 ) -> Result<HashMap<String, String>, Box<dyn Error>> {
     // Generate the tarball archive given the decompressed bytes
@@ -84,12 +130,16 @@ pub fn extract_tarball(
         let components = entry_path.components();
         let cleaned_entry_path: std::path::PathBuf = components.skip(1).collect();
 
-        let dir = PathBuf::from(STORE_DIR).join(target_dir);
-        std::fs::create_dir_all(&dir).into_diagnostic()?;
+        let (_, hex_integrity) = IntegrityOpts::new()
+            .algorithm(Algorithm::Sha512)
+            .chain(&buffer)
+            .result()
+            .to_hex();
         let file_path = PathBuf::from(STORE_DIR)
-            .join(target_dir)
-            .join(sanitize(cleaned_entry_path.to_string_lossy().as_ref()));
+            .join(content_path_from_hex(FileType::NonExec, &hex_integrity));
         if !std::path::Path::exists(&file_path) {
+            let parent_dir = file_path.parent().unwrap();
+            std::fs::create_dir_all(parent_dir).unwrap();
             let mut file = std::fs::File::create(&file_path).unwrap();
             file.write_all(&buffer).into_diagnostic()?;
         }
@@ -102,6 +152,10 @@ pub fn extract_tarball(
         // Insert the name of the file and map it to the hash of the file
         cas_file_map.insert(cleaned_entry_path.to_str().unwrap().to_string(), file_path.to_string_lossy().into_owned());
     }
+    let dir = PathBuf::from(STORE_DIR).join(index_location);
+    let parent_dir = dir.parent().unwrap();
+    std::fs::create_dir_all(parent_dir).unwrap();
+    std::fs::write(dir, serde_json::to_string(&cas_file_map)?)?;
 
     Ok(cas_file_map)
 }

@@ -47,14 +47,14 @@ pub async fn fetch_tarball(
 
 pub fn verify_checksum(
   response: &bytes::Bytes,
-  expeced_checksum: &str,
-) -> Result<(bool, Option<String>), Box<dyn std::error::Error>> {
+  expected_checksum: &str,
+) -> Result<(bool, Option<String>), Box<dyn Error>> {
   // begin
   // there are only 2 supported algorithms
   // sha1 and sha512
   // so we can be sure that if it doesn't start with sha1, it's going to have to be sha512
 
-  let algorithm = if expeced_checksum.starts_with("sha1") {
+  let algorithm = if expected_checksum.starts_with("sha1") {
     Algorithm::Sha1
   } else {
     Algorithm::Sha512
@@ -62,34 +62,31 @@ pub fn verify_checksum(
 
   let calculated_checksum = calc_hash(response, algorithm)?;
 
-  if calculated_checksum == expeced_checksum {
+  if calculated_checksum == expected_checksum {
     Ok((true, None))
   } else {
     Ok((false, Some(calculated_checksum)))
   }
 }
 
-fn calc_hash(
-  data: &bytes::Bytes,
-  algorithm: Algorithm,
-) -> Result<String, Box<dyn std::error::Error>> {
+fn calc_hash(data: &bytes::Bytes, algorithm: Algorithm) -> Result<String, Box<dyn Error>> {
   let integrity = if algorithm == Algorithm::Sha1 {
-    let hash = ssri::IntegrityOpts::new()
+    let hash = IntegrityOpts::new()
       .algorithm(Algorithm::Sha1)
-      .chain(&data)
+      .chain(data)
       .result();
     format!("sha1-{}", hash.to_hex().1)
   } else {
-    ssri::IntegrityOpts::new()
+    IntegrityOpts::new()
       .algorithm(Algorithm::Sha512)
-      .chain(&data)
+      .chain(data)
       .result()
       .to_string()
   };
   Ok(integrity)
 }
 
-async fn _fetch_tarball(url: &str) -> Result<bytes::Bytes, Box<dyn std::error::Error>> {
+async fn _fetch_tarball(url: &str) -> Result<bytes::Bytes, Box<dyn Error>> {
   let client = CLIENT.get_or_init(|| Client::builder().use_rustls_tls().build().unwrap());
   let res = client.get(url).send().await?;
   Ok(res.bytes().await?)
@@ -135,7 +132,7 @@ pub fn extract_tarball(
 
     let entry_path = entry.path().unwrap();
     let components = entry_path.components();
-    let cleaned_entry_path: std::path::PathBuf = components.skip(1).collect();
+    let cleaned_entry_path: PathBuf = components.skip(1).collect();
 
     let (_, hex_integrity) = IntegrityOpts::new()
       .algorithm(Algorithm::Sha512)
@@ -144,7 +141,7 @@ pub fn extract_tarball(
       .to_hex();
     let file_path =
       PathBuf::from(STORE_DIR).join(content_path_from_hex(FileType::NonExec, &hex_integrity));
-    if !std::path::Path::exists(&file_path) {
+    if !Path::exists(&file_path) {
       let parent_dir = file_path.parent().unwrap();
       std::fs::create_dir_all(parent_dir).unwrap();
       let mut file = std::fs::File::create(&file_path).unwrap();

@@ -54,7 +54,7 @@ fn algorithm_from_integrity(expected_checksum: &str) -> Algorithm {
   }
 }
 
-const DOWNLOAD_CHANNEL_CAPACITY: usize = 8;
+const DOWNLOAD_CHANNEL_CAPACITY: usize = 16;
 async fn fetch_and_extract_streaming(
   url: &str,
   expected_integrity: &str,

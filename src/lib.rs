@@ -1,8 +1,12 @@
 #![deny(clippy::all)]
 
+use bytes::Bytes;
+use flate2::read::GzDecoder;
+use futures::StreamExt;
 use miette::IntoDiagnostic;
 use reqwest::Client;
 use ssri::{Algorithm, Integrity, IntegrityOpts};
+use std::io;
 use std::path::Path;
 use std::{
   collections::HashMap,
@@ -12,6 +16,7 @@ use std::{
   sync::OnceLock,
 };
 use tar::Archive;
+use tokio::sync::mpsc;
 use tokio::task;
 
 const STORE_DIR: &str = "pnpm-store";
@@ -26,108 +31,83 @@ pub async fn fetch_tarball(
   url: String,
   integrity: String,
 ) -> Result<HashMap<String, String>, napi::Error> {
-  let response = _fetch_tarball(&url).await.unwrap();
-  if let Err(error) = verify_checksum(&response, &integrity) {
-    let error_message = match error {
-      VerifyChecksumError::Mismatch(_) => "Tarball verification failed".to_string(),
-      VerifyChecksumError::Other(error) => error.to_string(),
-    };
-    return Err(napi::Error::new(
-      napi::Status::GenericFailure,
-      error_message,
-    ));
-  }
-  task::spawn(async move {
-    let decompressed_response = decompress_gzip(&response).unwrap();
-    let parsed: Integrity = integrity.parse().unwrap();
-    let index_location_pb = content_path_from_hex(FileType::Index, parsed.to_hex().1.as_str());
-    let cas_file_map = extract_tarball(index_location_pb.as_path(), decompressed_response).unwrap();
-    Ok(cas_file_map)
-  })
-  .await
-  .unwrap()
+  let parsed: Integrity = integrity.parse().map_err(|error| {
+    napi::Error::new(
+      napi::Status::InvalidArg,
+      format!("Invalid integrity: {error}"),
+    )
+  })?;
+  let index_location = content_path_from_hex(FileType::Index, parsed.to_hex().1.as_str());
+  fetch_and_extract_streaming(&url, &integrity, index_location)
+    .await
+    .map_err(|error| napi::Error::new(napi::Status::GenericFailure, error.to_string()))
 }
 
-#[derive(Debug)]
-pub enum VerifyChecksumError {
-  Mismatch(String),
-  Other(Box<dyn Error>),
-}
-
-pub fn verify_checksum(
-  response: &bytes::Bytes,
-  expected_checksum: &str,
-) -> Result<(), VerifyChecksumError> {
-  // begin
-  // there are only 2 supported algorithms
-  // sha1 and sha512
-  // so we can be sure that if it doesn't start with sha1, it's going to have to be sha512
-
-  let algorithm = if expected_checksum.starts_with("sha1") {
+/// there are only 2 supported algorithms
+/// sha1 and sha512
+/// so we can be sure that if it doesn't start with sha1, it's going to have to be sha512
+fn algorithm_from_integrity(expected_checksum: &str) -> Algorithm {
+  if expected_checksum.starts_with("sha1") {
     Algorithm::Sha1
   } else {
     Algorithm::Sha512
-  };
-
-  let calculated_checksum = calc_hash(response, algorithm).map_err(VerifyChecksumError::Other)?;
-
-  if calculated_checksum == expected_checksum {
-    Ok(())
-  } else {
-    Err(VerifyChecksumError::Mismatch(calculated_checksum))
   }
 }
 
-fn calc_hash(data: &bytes::Bytes, algorithm: Algorithm) -> Result<String, Box<dyn Error>> {
-  let integrity = if algorithm == Algorithm::Sha1 {
-    let hash = IntegrityOpts::new()
-      .algorithm(Algorithm::Sha1)
-      .chain(data)
-      .result();
-    format!("sha1-{}", hash.to_hex().1)
-  } else {
-    IntegrityOpts::new()
-      .algorithm(Algorithm::Sha512)
-      .chain(data)
-      .result()
-      .to_string()
-  };
-  Ok(integrity)
-}
-
-async fn _fetch_tarball(url: &str) -> Result<bytes::Bytes, Box<dyn Error>> {
+const DOWNLOAD_CHANNEL_CAPACITY: usize = 16;
+async fn fetch_and_extract_streaming(
+  url: &str,
+  expected_integrity: &str,
+  index_location: PathBuf,
+) -> Result<HashMap<String, String>, Box<dyn Error + Send + Sync>> {
   let client = CLIENT.get_or_init(|| Client::builder().use_rustls_tls().build().unwrap());
-  let res = client.get(url).send().await?;
-  Ok(res.bytes().await?)
+  let response = client.get(url).send().await?;
+  if !response.status().is_success() {
+    return Err(format!("Failed to fetch tarball: {}", response.status()).into());
+  }
+  let (tx, rx) = mpsc::channel::<Result<Bytes, String>>(DOWNLOAD_CHANNEL_CAPACITY);
+  let extractor = task::spawn_blocking(move || {
+    let reader = ChannelRead::new(rx);
+    let gz = GzDecoder::new(reader);
+    extract_tarball(gz)
+  });
+
+  let algorithm = algorithm_from_integrity(expected_integrity);
+  let mut integrity_opts = IntegrityOpts::new().algorithm(algorithm);
+
+  let mut stream = response.bytes_stream();
+
+  while let Some(item) = stream.next().await {
+    let chunk = match item {
+      Ok(chunk) => chunk,
+      Err(error) => {
+        let _ = tx.send(Err(error.to_string())).await;
+        return Err(Box::new(error));
+      }
+    };
+
+    integrity_opts = integrity_opts.chain(&chunk);
+
+    if tx.send(Ok(chunk)).await.is_err() {
+      return Err("extractor stopped before download completed".into());
+    }
+  }
+  drop(tx);
+  let cas_file_map = extractor.await??;
+  // let calculated_integrity = integrity_to_string(integrity_opts.result(), algorithm);
+  let calculated_integrity = integrity_opts.result().to_string();
+  if calculated_integrity != expected_integrity {
+    return Err("Tarball verification failed".into());
+  }
+  write_index(index_location.as_path(), &cas_file_map)?;
+  Ok(cas_file_map)
 }
 
-pub fn decompress_gzip(gz_data: &[u8]) -> Result<Vec<u8>, Box<dyn Error>> {
-  // gzip RFC1952: a valid gzip file has an ISIZE field in the
-  // footer, which is a little-endian u32 number representing the
-  // decompressed size. This is ideal for libdeflate, which needs
-  // preallocating the decompressed buffer.
-  let isize = {
-    let isize_start = gz_data.len() - 4;
-    let isize_bytes: [u8; 4] = gz_data[isize_start..].try_into().into_diagnostic()?;
-    u32::from_le_bytes(isize_bytes) as usize
-  };
-
-  let mut decompressor = libdeflater::Decompressor::new();
-
-  let mut outbuf = vec![0; isize];
-  decompressor
-    .gzip_decompress(gz_data, &mut outbuf)
-    .into_diagnostic()?;
-
-  Ok(outbuf)
-}
-
-pub fn extract_tarball(
-  index_location: &Path,
-  data: Vec<u8>,
-) -> Result<HashMap<String, String>, Box<dyn Error>> {
+pub fn extract_tarball<R: Read>(
+  data: R,
+) -> Result<HashMap<String, String>, Box<dyn Error + Send + Sync>> {
   // Generate the tarball archive given the decompressed bytes
-  let mut node_archive = Archive::new(Cursor::new(data));
+  let mut node_archive = Archive::new(data);
 
   // extract to both the global store + node_modules (in the case of them using the pnpm linking algorithm)
   let mut cas_file_map: HashMap<String, String> = HashMap::new();
@@ -168,12 +148,19 @@ pub fn extract_tarball(
       file_path.to_string_lossy().into_owned(),
     );
   }
+
+  Ok(cas_file_map)
+}
+
+fn write_index(
+  index_location: &Path,
+  cas_file_map: &HashMap<String, String>,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
   let dir = PathBuf::from(STORE_DIR).join(index_location);
   let parent_dir = dir.parent().unwrap();
   std::fs::create_dir_all(parent_dir).unwrap();
   std::fs::write(dir, serde_json::to_string(&cas_file_map)?)?;
-
-  Ok(cas_file_map)
+  Ok(())
 }
 
 enum FileType {
@@ -195,6 +182,36 @@ fn content_path_from_hex(file_type: FileType, hex: &str) -> PathBuf {
   p.push(&format!("{}{}", &hex[2..], extension));
 
   p
+}
+
+struct ChannelRead {
+  rx: mpsc::Receiver<Result<Bytes, String>>,
+  current: Cursor<Bytes>,
+}
+
+impl ChannelRead {
+  fn new(rx: mpsc::Receiver<Result<Bytes, String>>) -> Self {
+    Self {
+      rx,
+      current: Cursor::new(Bytes::new()),
+    }
+  }
+}
+
+impl Read for ChannelRead {
+  /// Async channel read to Sync read
+  fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+    if self.current.position() == self.current.get_ref().len() as u64 {
+      match self.rx.blocking_recv() {
+        Some(Ok(chunk)) => {
+          self.current = Cursor::new(chunk);
+        }
+        Some(Err(e)) => return Err(std::io::Error::new(std::io::ErrorKind::Other, e)),
+        None => {}
+      }
+    }
+    self.current.read(buf)
+  }
 }
 
 #[test]

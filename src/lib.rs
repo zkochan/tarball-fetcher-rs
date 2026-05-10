@@ -94,20 +94,13 @@ async fn fetch_and_extract_streaming(
   }
   drop(tx);
   let cas_file_map = extractor.await??;
-  let calculated_integrity = integrity_to_string(integrity_opts.result(), algorithm);
+  // let calculated_integrity = integrity_to_string(integrity_opts.result(), algorithm);
+  let calculated_integrity = integrity_opts.result().to_string();
   if calculated_integrity != expected_integrity {
     return Err("Tarball verification failed".into());
   }
   write_index(index_location.as_path(), &cas_file_map)?;
   Ok(cas_file_map)
-}
-
-fn integrity_to_string(integrity: Integrity, algo: Algorithm) -> String {
-  if algo == Algorithm::Sha1 {
-    format!("sha1-{}", integrity.to_hex().1)
-  } else {
-    integrity.to_string()
-  }
 }
 
 pub fn extract_tarball<R: Read>(
